@@ -1,22 +1,3 @@
-/*
- * StripperSharp
- * Copyright (C) 2023-2025 Kxnrl. All Rights Reserved.
- *
- * This file is part of StripperSharp.
- * ModSharp is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * ModSharp is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with ModSharp. If not, see <https://www.gnu.org/licenses/>.
- */
-
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -71,7 +52,7 @@ internal sealed unsafe class Stripper : IModSharpModule, IGameListener
 
         _modSharp = sharedSystem.GetModSharp();
         _detour   = sharedSystem.GetHookManager().CreateDetourHook();
-        _config   = new StripperConfig(Path.Combine(sharpPath, "stripper"));
+        _config   = new StripperConfig(Path.Combine(sharpPath, "stripper"), _logger);
 
         _cvarEnableVerbose = sharedSystem.GetConVarManager()
                                          .CreateConVar("ms_stripper_verbose_enabled",
@@ -360,38 +341,45 @@ file static unsafe class Matcher
 
         foreach (var match in connections)
         {
+            bool matches = true;
+
             if (match.Input is not null && !MatchValue(input, match.Input))
             {
-                return false;
+                matches = false;
             }
 
             if (match.Output is not null && !MatchValue(output, match.Output, true))
             {
-                return false;
+                matches = false;
             }
 
             if (match.Target is not null && !MatchValue(target, match.Target))
             {
-                return false;
+                matches = false;
             }
 
             if (match.Param is not null && !MatchValue(param, match.Param, true))
             {
-                return false;
+                matches = false;
             }
 
             if (match.Delay is { } md && !MatchValue(delay, md))
             {
-                return false;
+                matches = false;
             }
 
             if (match.Limit is { } ml && limit != ml)
             {
-                return false;
+                matches = false;
+            }
+
+            if (matches)
+            {
+                return true;
             }
         }
 
-        return true;
+        return false;
     }
 
     internal static bool MatchValue(string value, string match, bool allowWildcard = false)
