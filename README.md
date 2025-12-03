@@ -1,3 +1,6 @@
+# You Must Enable "ms_entity_io_enhancement" !!!
+
+
 # StripperSharp
 
 A C# port of [Striper:Source](https://github.com/alliedmodders/stripper-source) & [StripperCS2](https://github.com/Source2ZE/StripperCS2) powered by [ModSharp](https://github.com/Kxnrl/modsharp-public).
