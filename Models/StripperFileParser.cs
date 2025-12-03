@@ -30,33 +30,37 @@ internal static class StripperFileParser
         var parsedData = ParseWithDuplicateKeys(content);
 
         _logger?.LogDebug("ParseWithDuplicateKeys result: {Keys}", string.Join(", ", parsedData.Keys));
-        if (parsedData.TryGetValue("add", out var addValues))
+
+        var addList = parsedData.TryGetValue("add", out var addValues) && addValues.Count > 0
+            ? addValues.SelectMany(jsonStr => ParseArrayOrObject(jsonStr)).Where(dict => dict.Count > 0).ToList()
+            : null;
+
+        if (addValues != null)
         {
             _logger?.LogDebug("Found {Count} 'add' entries", addValues.Count);
         }
-        if (parsedData.TryGetValue("modify", out var modifyValues))
+
+        var modifyList = parsedData.TryGetValue("modify", out var modifyValues) && modifyValues.Count > 0
+            ? modifyValues.SelectMany(jsonStr => ParseArrayOrObject(jsonStr)).Where(dict => dict.Count > 0).ToList()
+            : null;
+
+        if (modifyValues != null)
         {
             _logger?.LogDebug("Found {Count} 'modify' entries", modifyValues.Count);
         }
-        if (parsedData.TryGetValue("remove", out var removeValues))
+
+        List<string>? removeValues = null;
+        List<string>? filterValues = null;
+        var hasRemove = parsedData.TryGetValue("remove", out removeValues) && removeValues.Count > 0;
+        var hasFilter = parsedData.TryGetValue("filter", out filterValues) && filterValues.Count > 0;
+
+        var removeList = (hasRemove ? removeValues : hasFilter ? filterValues : null)
+            ?.SelectMany(jsonStr => ParseArrayOrObject(jsonStr)).Where(dict => dict.Count > 0).ToList();
+
+        if (hasRemove || hasFilter)
         {
-            _logger?.LogDebug("Found {Count} 'remove' entries", removeValues.Count);
+            _logger?.LogDebug("Found {Count} 'remove' entries", (removeValues?.Count ?? filterValues?.Count) ?? 0);
         }
-
-        var addList = parsedData.TryGetValue("add", out var addValues2) && addValues2.Count > 0
-            ? addValues2.SelectMany(jsonStr => ParseArrayOrObject(jsonStr)).Where(dict => dict != null && dict.Count > 0).ToList()
-            : null;
-
-        var modifyList = parsedData.TryGetValue("modify", out var modifyValues2) && modifyValues2.Count > 0
-            ? modifyValues2.SelectMany(jsonStr => ParseArrayOrObject(jsonStr)).Where(dict => dict != null && dict.Count > 0).ToList()
-            : null;
-
-        var removeList = (parsedData.TryGetValue("remove", out var removeValues2) && removeValues2.Count > 0
-            ? removeValues2
-            : parsedData.TryGetValue("filter", out var filterValues) && filterValues.Count > 0
-                ? filterValues
-                : null)
-            ?.SelectMany(jsonStr => ParseArrayOrObject(jsonStr)).Where(dict => dict != null && dict.Count > 0).ToList();
 
         _logger?.LogDebug("Parsed result: Add={AddCount}, Modify={ModifyCount}, Remove={RemoveCount}", 
             addList?.Count ?? 0, modifyList?.Count ?? 0, removeList?.Count ?? 0);
@@ -120,10 +124,7 @@ internal static class StripperFileParser
                     if (depth == 1 && currentKey != null)
                     {
                         isValueArray = true;
-                        // StartArray 토큰을 읽은 후, reader.BytesConsumed는 '[' 다음 위치를 가리킵니다
-                        // '['를 포함하려면 역방향으로 찾아야 합니다
                         var pos = (int)reader.BytesConsumed;
-                        // 공백/줄바꿈을 건너뛰고 '['를 찾습니다
                         while (pos > 0 && char.IsWhiteSpace((char)bytes[pos - 1]))
                         {
                             pos--;
@@ -134,7 +135,6 @@ internal static class StripperFileParser
                         }
                         else
                         {
-                            // '['를 찾지 못한 경우, 현재 위치를 사용 (공백 제거 후)
                             valueStartPosition = pos;
                         }
                     }
@@ -145,22 +145,16 @@ internal static class StripperFileParser
                     depth--;
                     if (depth == 1 && currentKey != null && isValueArray)
                     {
-                        // EndArray 토큰을 읽은 후, reader.BytesConsumed는 ']' 다음 위치를 가리킵니다
-                        // ']'를 포함하되, 뒤의 쉼표와 공백은 제외해야 합니다
                         var endPos = (int)reader.BytesConsumed;
-                        // 공백/줄바꿈을 건너뛰고 ']'를 찾습니다
                         while (endPos > 0 && char.IsWhiteSpace((char)bytes[endPos - 1]))
                         {
                             endPos--;
                         }
-                        // ']'를 포함해야 하므로, endPos가 ']' 다음 위치를 가리키므로
-                        // endPos를 그대로 사용하면 ']'를 포함합니다
                         var length = endPos - (int)valueStartPosition;
                         if (length > 0)
                         {
                             var valueBytes = bytes.AsSpan((int)valueStartPosition, length);
                             var valueJson = Encoding.UTF8.GetString(valueBytes);
-                            // 뒤의 쉼표와 공백 제거 (TrimEnd 사용)
                             valueJson = valueJson.TrimEnd(',', ' ', '\t', '\n', '\r');
                             if (!result.ContainsKey(currentKey))
                             {
@@ -297,7 +291,6 @@ internal static class StripperFileParser
             
             if (doc.RootElement.ValueKind == JsonValueKind.Array)
             {
-                // 배열인 경우 각 요소를 처리
                 foreach (var element in doc.RootElement.EnumerateArray())
                 {
                     if (element.ValueKind == JsonValueKind.Object)
@@ -308,7 +301,6 @@ internal static class StripperFileParser
             }
             else if (doc.RootElement.ValueKind == JsonValueKind.Object)
             {
-                // 객체인 경우 직접 변환
                 results.Add(ConvertElementToDictionary(doc.RootElement));
             }
             
@@ -316,9 +308,6 @@ internal static class StripperFileParser
         }
         catch (JsonException ex)
         {
-            // JSON 파싱 실패 시 스킵
-            // ParseWithDuplicateKeys가 반환한 문자열이 유효하지 않을 수 있음
-            // 특히 중복 키가 있을 때 배열 추출이 잘못될 수 있음
             _logger?.LogError(ex, "Failed to parse JSON string from ParseWithDuplicateKeys, skipping. Length: {Length}, Preview: {Preview}", 
                 jsonString.Length, 
                 jsonString.Length > 500 ? jsonString.Substring(0, 500) + "..." : jsonString);
@@ -326,7 +315,6 @@ internal static class StripperFileParser
         }
         catch (Exception ex)
         {
-            // 기타 예외 처리
             _logger?.LogError(ex, "Unexpected error parsing JSON string. Length: {Length}, Error: {Error}", jsonString.Length, ex.Message);
             return Array.Empty<Dictionary<string, JsonDocument>>();
         }
