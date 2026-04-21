@@ -264,6 +264,10 @@ internal unsafe struct CEntityKeyValues
             {
                 var kv3 = CKeyValues3.Create(KeyValues3Type.Null, KeyValues3SubType.UnSpecified);
                 _fnAddConnectionDesc(pThis, pOutput, targetType, pTarget, pInput, pParam, limit, delay, kv3);
+                // NOTE: 엔진 구현이 kv3 를 복사하지 않고 포인터를 보관할 경우 아래 DeleteThis()
+                // 가 use-after-free 를 유발할 수 있음. 현 시점까지 관측된 안정 동작을 기준으로
+                // 유지하되, 향후 엔진 갱신으로 크래시가 발견되면 이 호출을 제거하고
+                // 엔진이 소유권을 갖도록 변경해야 한다.
                 kv3->DeleteThis();
             }
         }

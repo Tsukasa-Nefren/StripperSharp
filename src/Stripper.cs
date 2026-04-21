@@ -21,7 +21,7 @@ internal sealed unsafe class Stripper : IModSharpModule, IGameListener
     public string DisplayName   => "StripperSharp";
     public string DisplayAuthor => "Kxnrl";
 
-    public static readonly JsonSerializerOptions SerializerOptions = SerializerOptions = new JsonSerializerOptions
+    public static readonly JsonSerializerOptions SerializerOptions = new JsonSerializerOptions
     {
         AllowTrailingCommas  = true,
         ReadCommentHandling  = JsonCommentHandling.Skip,
@@ -59,14 +59,14 @@ internal sealed unsafe class Stripper : IModSharpModule, IGameListener
                                                        false,
                                                        "Enable verbose logging of stripper",
                                                        ConVarFlags.Release)
-                             ?? throw new EntryPointNotFoundException("Failed to create conVar 'ms_stripper_verbose_enabled'");
+                             ?? throw new InvalidOperationException("Failed to create conVar 'ms_stripper_verbose_enabled'");
 
         _cvarEnableReplace = sharedSystem.GetConVarManager()
                                          .CreateConVar("ms_stripper_replace_enabled",
-                                                       true,
+                                                       false, // README 기본값(false)과 맞춤 — 'replace' 는 명시적 활성화가 필요한 destructive 작업
                                                        "Enable 'replace' block in 'modify' section.",
                                                        ConVarFlags.Release)
-                             ?? throw new EntryPointNotFoundException("Failed to create conVar 'ms_stripper_replace_enabled'");
+                             ?? throw new InvalidOperationException("Failed to create conVar 'ms_stripper_replace_enabled'");
 
         _sInstance = this;
     }
@@ -79,7 +79,14 @@ internal sealed unsafe class Stripper : IModSharpModule, IGameListener
         _detour.Prepare("IWorldRendererMgr::CreateWorldInternal",
                         (nint) (delegate* unmanaged<nint, CSingleWorldRep*, nint>) &CreateWorldInternal);
 
-        return _detour.Install();
+        if (!_detour.Install())
+        {
+            _logger.LogError("Failed to install detour for IWorldRendererMgr::CreateWorldInternal. " +
+                             "Check that 'stripper.games' gamedata signatures match the current CS2 build.");
+            return false;
+        }
+
+        return true;
     }
 
     public void PostInit()
@@ -137,6 +144,18 @@ internal sealed unsafe class Stripper : IModSharpModule, IGameListener
     {
         try
         {
+            if (pSingleWorld == null)
+            {
+                _logger.LogWarning("ApplyOverrides called with null pSingleWorld");
+                return;
+            }
+
+            if (pSingleWorld->pWorld == null)
+            {
+                _logger.LogWarning("pSingleWorld->pWorld is null; skipping overrides");
+                return;
+            }
+
             ref var lumpHandles = ref pSingleWorld->pWorld->EntityLumps;
 
             var mapName   = _modSharp.GetGlobals().MapName;
@@ -146,7 +165,14 @@ internal sealed unsafe class Stripper : IModSharpModule, IGameListener
             {
                 ref var lump     = ref lumpHandles.Element(i);
                 var     lumpData = lump.AsRef().m_pLumpData;
-                var     lumpName = lumpData->pName.Get();
+
+                if (lumpData == null)
+                {
+                    _logger.LogWarning("m_pLumpData is null at lump index {Index}; skipping", i);
+                    continue;
+                }
+
+                var lumpName = lumpData->pName.Get();
 
                 if (_config.Lumps.TryGetValue($"{worldName}::{lumpName}", out var lumpOverrides))
                 {
@@ -178,13 +204,13 @@ internal sealed unsafe class Stripper : IModSharpModule, IGameListener
         {
             foreach (var remove in removes)
             {
-                for (var j = 0; j < lump->EntityKeyValues.Size; j++)
+                for (var j = lump->EntityKeyValues.Size - 1; j >= 0; j--)
                 {
                     var kv = lump->EntityKeyValues.Element(j).Value;
 
                     if (Matcher.DoesEntityMatch(kv, remove))
                     {
-                        lump->EntityKeyValues.Remove(j--);
+                        lump->EntityKeyValues.Remove(j);
 
                         if (_cvarEnableVerbose.GetBool())
                         {
@@ -225,43 +251,71 @@ internal sealed unsafe class Stripper : IModSharpModule, IGameListener
                 var matches = matchDoc.Deserialize<Dictionary<string, JsonDocument>>(SerializerOptions)
                               ?? throw new JsonException("Failed to Deserialize<Dictionary<string, JsonDocument>>");
 
+                // Deserialize를 루프 밖에서 한 번만 수행
+                Dictionary<string, JsonDocument>? deletions = null;
+                Dictionary<string, JsonDocument>? replaces = null;
+                Dictionary<string, JsonDocument>? insertions = null;
+
+                if (modify.TryGetValue("delete", out var deleteDoc))
+                {
+                    deletions = deleteDoc.Deserialize<Dictionary<string, JsonDocument>>(SerializerOptions);
+                }
+
+                if (modify.TryGetValue("replace", out var replaceDoc) && _cvarEnableReplace.GetBool())
+                {
+                    replaces = replaceDoc.Deserialize<Dictionary<string, JsonDocument>>(SerializerOptions);
+                }
+
+                if (modify.TryGetValue("insert", out var insertDoc))
+                {
+                    insertions = insertDoc.Deserialize<Dictionary<string, JsonDocument>>(SerializerOptions);
+                }
+
+                var enableVerbose = _cvarEnableVerbose.GetBool();
+                StringBuilder? builder = enableVerbose ? new StringBuilder() : null;
+
                 for (var j = 0; j < lump->EntityKeyValues.Size; j++)
                 {
                     var kv = lump->EntityKeyValues.Element(j).Value;
 
                     if (Matcher.DoesEntityMatch(kv, matches))
                     {
-                        var builder = new StringBuilder();
-
-                        if (modify.GetValueOrDefault("delete")
-                                  ?.Deserialize<Dictionary<string, JsonDocument>>(SerializerOptions) is { } deletions)
+                        if (deletions is { } del)
                         {
-                            Modifier.DeleteKeyValues(kv, deletions);
+                            Modifier.DeleteKeyValues(kv, del);
 
-                            builder.Append($"  Deleted\n    {JsonSerializer.Serialize(deletions, SerializerOptions)}\n");
+                            if (enableVerbose && builder != null)
+                            {
+                                builder.Append($"  Deleted\n    {JsonSerializer.Serialize(del, SerializerOptions)}\n");
+                            }
                         }
 
-                        if (modify.GetValueOrDefault("replace")
-                                  ?.Deserialize<Dictionary<string, JsonDocument>>(SerializerOptions) is { } replaces)
+                        if (replaces is { } rep)
                         {
-                            Modifier.InsertKeyValues(kv, replaces, false);
+                            Modifier.InsertKeyValues(kv, rep, false);
 
-                            builder.Append($"  Replaced\n    {JsonSerializer.Serialize(replaces, SerializerOptions)}\n");
+                            if (enableVerbose && builder != null)
+                            {
+                                builder.Append($"  Replaced\n    {JsonSerializer.Serialize(rep, SerializerOptions)}\n");
+                            }
                         }
 
-                        if (modify.GetValueOrDefault("insert")
-                                  ?.Deserialize<Dictionary<string, JsonDocument>>(SerializerOptions) is { } insertions)
+                        if (insertions is { } ins)
                         {
-                            Modifier.InsertKeyValues(kv, insertions);
+                            Modifier.InsertKeyValues(kv, ins);
 
-                            builder.Append($"  Inserted\n    {JsonSerializer.Serialize(insertions, SerializerOptions)}\n");
+                            if (enableVerbose && builder != null)
+                            {
+                                builder.Append($"  Inserted\n    {JsonSerializer.Serialize(ins, SerializerOptions)}\n");
+                            }
                         }
 
-                        if (_cvarEnableVerbose.GetBool())
+                        if (enableVerbose && builder != null)
                         {
                             _logger.LogInformation("Modified\n{m}\n{b}",
                                                    JsonSerializer.Serialize(matches, SerializerOptions),
                                                    builder.ToString());
+                            builder.Clear();
                         }
                     }
                 }
@@ -272,11 +326,14 @@ internal sealed unsafe class Stripper : IModSharpModule, IGameListener
 
 file static unsafe class Matcher
 {
+    internal const string ConnectionsKey = "connections";
+    internal const string IOKey = "io";
+
     internal static bool DoesEntityMatch(CEntityKeyValues* kv, Dictionary<string, JsonDocument> matches)
     {
         foreach (var (key, doc) in matches)
         {
-            if (key.Equals("connections") || key.Equals("io"))
+            if (key.Equals(ConnectionsKey, StringComparison.OrdinalIgnoreCase) || key.Equals(IOKey, StringComparison.OrdinalIgnoreCase))
             {
                 var connectionCount = kv->ConnectionDescs.Count;
 
@@ -406,7 +463,7 @@ file static unsafe class Modifier
     {
         foreach (var (key, doc) in insertions)
         {
-            if (key.Equals("connections") || key.Equals("io"))
+            if (key.Equals(Matcher.ConnectionsKey, StringComparison.OrdinalIgnoreCase) || key.Equals(Matcher.IOKey, StringComparison.OrdinalIgnoreCase))
             {
                 if (loopableConnection)
                 {
@@ -468,7 +525,7 @@ file static unsafe class Modifier
     {
         foreach (var (key, doc) in deletions)
         {
-            if (key.Equals("connections") || key.Equals("io"))
+            if (key.Equals(Matcher.ConnectionsKey, StringComparison.OrdinalIgnoreCase) || key.Equals(Matcher.IOKey, StringComparison.OrdinalIgnoreCase))
             {
                 var connectionCount = kv->ConnectionDescs.Count;
 
@@ -485,14 +542,13 @@ file static unsafe class Modifier
                     continue;
                 }
 
-                for (var i = 0; i < connectionCount; i++)
+                for (var i = connectionCount - 1; i >= 0; i--)
                 {
                     ref var desc = ref kv->ConnectionDescs[i];
 
                     if (Matcher.MatchConnection(in desc, connections))
                     {
-                        connectionCount--;
-                        kv->RemoveConnectionDesc(i--);
+                        kv->RemoveConnectionDesc(i);
                     }
                 }
             }

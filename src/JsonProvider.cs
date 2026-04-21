@@ -21,7 +21,11 @@ public static class JsonProvider
     public static List<BaseAction> Load(string path)
     {
         var content = File.ReadAllText(path);
-        
+        return LoadFromContent(content);
+    }
+
+    public static List<BaseAction> LoadFromContent(string content)
+    {
         content = RemoveComments(content);
 
         var options = new JsonSerializerOptions

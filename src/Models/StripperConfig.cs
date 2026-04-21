@@ -34,6 +34,12 @@ internal class StripperConfig
         GlobalActions = new List<BaseAction>();
         GlobalDefaultActions = new List<BaseAction>();
         _logger = logger;
+        
+        if (logger != null)
+        {
+            StripperFileParser.SetLogger(logger);
+            JsonProvider.SetLogger(logger);
+        }
     }
 
     public void Purge()
@@ -53,30 +59,51 @@ internal class StripperConfig
             return;
         }
 
-        try
+        var globalPath        = Path.Combine(_stripperPath, "global.jsonc");
+        var globalDefaultPath = Path.Combine(_stripperPath, "global_default.jsonc");
+
+        if (File.Exists(globalPath))
         {
-            var globalPath = Path.Combine(_stripperPath, "global.jsonc");
-            if (File.Exists(globalPath))
+            try
             {
                 GlobalActions = JsonProvider.Load(globalPath);
                 _logger?.LogDebug("Loaded global.jsonc with {Count} actions", GlobalActions.Count);
             }
+            catch (Exception e)
+            {
+                _logger?.LogError(e, "Failed to load global.jsonc actions, skipping");
+            }
 
-            var globalDefaultPath = Path.Combine(_stripperPath, "global_default.jsonc");
-            if (File.Exists(globalDefaultPath))
+            try
+            {
+                Global = LoadFile(globalPath);
+            }
+            catch (Exception e)
+            {
+                _logger?.LogError(e, "Failed to parse global.jsonc data, skipping");
+            }
+        }
+
+        if (File.Exists(globalDefaultPath))
+        {
+            try
             {
                 GlobalDefaultActions = JsonProvider.Load(globalDefaultPath);
                 _logger?.LogDebug("Loaded global_default.jsonc with {Count} actions", GlobalDefaultActions.Count);
             }
+            catch (Exception e)
+            {
+                _logger?.LogError(e, "Failed to load global_default.jsonc actions, skipping");
+            }
 
-            Global        = LoadFile(globalPath);
-            GlobalDefault = LoadFile(globalDefaultPath);
-        }
-        catch
-        {
-            Purge();
-
-            throw;
+            try
+            {
+                GlobalDefault = LoadFile(globalDefaultPath);
+            }
+            catch (Exception e)
+            {
+                _logger?.LogError(e, "Failed to parse global_default.jsonc data, skipping");
+            }
         }
 
         var mapPath = Path.Combine(_stripperPath, "maps", mapName);
@@ -91,6 +118,16 @@ internal class StripperConfig
             try
             {
                 var cleanPath = Path.GetRelativePath(mapPath, filePath);
+
+                // Canonical path 검증 (symlink / .. 구성으로 mapPath 밖 지시 방지)
+                var canonical = Path.GetFullPath(Path.Combine(mapPath, cleanPath));
+                var mapRoot   = Path.GetFullPath(mapPath) + Path.DirectorySeparatorChar;
+                if (!canonical.StartsWith(mapRoot, StringComparison.OrdinalIgnoreCase))
+                {
+                    _logger?.LogWarning("Path traversal detected, skipping: {File}", filePath);
+                    continue;
+                }
+
                 var parentDir = Path.GetDirectoryName(cleanPath);
                 var worldName = string.IsNullOrWhiteSpace(parentDir) ? mapName : parentDir;
                 var lumpName  = Path.GetFileNameWithoutExtension(cleanPath);
@@ -111,10 +148,9 @@ internal class StripperConfig
             }
             catch (Exception e)
             {
-                Lumps.Clear();
-                LumpsActions.Clear();
-
-                throw new FileLoadException("Failed to parse stripper file", filePath, e);
+                // 한 파일의 파싱 실패로 이전까지 누적된 정상 설정을 모두 날리지 않는다.
+                // 실패한 파일만 건너뛰고 다음 파일 처리 계속.
+                _logger?.LogError(e, "Failed to parse stripper file, skipping: {File}", filePath);
             }
         }
     }
@@ -123,9 +159,21 @@ internal class StripperConfig
     {
         if (!File.Exists(file))
         {
+            _logger?.LogDebug("File does not exist: {File}", file);
             return null;
         }
 
-        return StripperFileParser.ParseFile(file, _encoding);
+        _logger?.LogDebug("Loading file: {File}", file);
+        var result = StripperFileParser.ParseFile(file, _encoding);
+        if (result == null)
+        {
+            _logger?.LogWarning("ParseFile returned null for: {File}", file);
+        }
+        else
+        {
+            _logger?.LogDebug("Successfully parsed file: {File}, Add={AddCount}, Modify={ModifyCount}, Remove={RemoveCount}", 
+                file, result.Add?.Count ?? 0, result.Modify?.Count ?? 0, result.Remove?.Count ?? 0);
+        }
+        return result;
     }
 }
