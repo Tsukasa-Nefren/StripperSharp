@@ -8,7 +8,7 @@
         <AssemblyName>StripperSharp</AssemblyName>
         <RootNamespace>Kxnrl.StripperSharp</RootNamespace>
         <VersionPrefix>1.1</VersionPrefix>
-        <VersionSuffix>0</VersionSuffix>
+        <VersionSuffix>1</VersionSuffix>
         <Version>$(VersionPrefix).$(VersionSuffix)</Version>
         <Copyright>©2025 Kxnrl</Copyright>
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>

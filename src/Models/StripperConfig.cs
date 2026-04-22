@@ -129,21 +129,55 @@ internal class StripperConfig
                 }
 
                 var parentDir = Path.GetDirectoryName(cleanPath);
-                var worldName = string.IsNullOrWhiteSpace(parentDir) ? mapName : parentDir;
-                var lumpName  = Path.GetFileNameWithoutExtension(cleanPath);
-                var keyPair   = $"{worldName}::{lumpName}";
+                var fileName  = Path.GetFileNameWithoutExtension(cleanPath);
+
+                // 이 포크가 지원해야 하는 파일명 컨벤션:
+                //   1) "default_ents.jsonc"                 → mapName::default_ents
+                //   2) "<worldName>#<lumpName>.jsonc"       → worldName::lumpName  (sub-world prefab instance 등)
+                //   3) "<subdir>/<lumpName>.jsonc"          → subdir::lumpName     (skybox 등)
+                //   4) "default_ents(t).jsonc", "default_1ents.jsonc" 같은 변형도 lumpName 그대로 보존
+                string worldName;
+                string lumpName;
+
+                var hashIdx = fileName.IndexOf('#');
+                if (hashIdx > 0 && hashIdx < fileName.Length - 1)
+                {
+                    // 패턴 (2): 파일명 안의 '#' 로 world/lump 분리
+                    worldName = fileName.Substring(0, hashIdx);
+                    lumpName  = fileName.Substring(hashIdx + 1);
+                }
+                else if (!string.IsNullOrWhiteSpace(parentDir))
+                {
+                    // 패턴 (3): 서브 디렉토리 이름이 곧 sub-world 이름
+                    worldName = parentDir;
+                    lumpName  = fileName;
+                }
+                else
+                {
+                    // 패턴 (1): main world
+                    worldName = mapName;
+                    lumpName  = fileName;
+                }
+
+                var keyPair = $"{worldName}::{lumpName}";
 
                 var actions = JsonProvider.Load(filePath);
                 if (actions.Count > 0)
                 {
                     LumpsActions[keyPair] = actions;
-                    _logger?.LogDebug("Loaded {Path} with {Count} actions", filePath, actions.Count);
+                    _logger?.LogDebug("Loaded {Path} with {Count} actions (key={Key})", filePath, actions.Count, keyPair);
                 }
 
                 var lumpData = LoadFile(filePath);
                 if (lumpData != null)
                 {
-                    Lumps.Add(keyPair, lumpData);
+                    // 같은 keyPair 에 여러 파일이 매핑되는 극단 케이스 방어 (예: default_ents.jsonc + default_ents(t).jsonc)
+                    // 마지막 파일이 이긴다. Dictionary.Add 대신 인덱서 사용.
+                    if (Lumps.ContainsKey(keyPair))
+                    {
+                        _logger?.LogWarning("Duplicate lump key '{Key}' — overwriting with {File}", keyPair, filePath);
+                    }
+                    Lumps[keyPair] = lumpData;
                 }
             }
             catch (Exception e)
@@ -153,6 +187,10 @@ internal class StripperConfig
                 _logger?.LogError(e, "Failed to parse stripper file, skipping: {File}", filePath);
             }
         }
+
+        _logger?.LogInformation(
+            "Stripper config loaded for map '{Map}': {LumpCount} lump entries, {ActionCount} action entries, global={Global}, global_default={GlobalDefault}",
+            mapName, Lumps.Count, LumpsActions.Count, Global is not null, GlobalDefault is not null);
     }
 
     private StripperFile? LoadFile(string file)

@@ -63,7 +63,7 @@ internal sealed unsafe class Stripper : IModSharpModule, IGameListener
 
         _cvarEnableReplace = sharedSystem.GetConVarManager()
                                          .CreateConVar("ms_stripper_replace_enabled",
-                                                       false, // README 기본값(false)과 맞춤 — 'replace' 는 명시적 활성화가 필요한 destructive 작업
+                                                       true, // 이 포크는 replace 를 전제로 한 맵 설정들을 다루므로 기본 활성화.
                                                        "Enable 'replace' block in 'modify' section.",
                                                        ConVarFlags.Release)
                              ?? throw new InvalidOperationException("Failed to create conVar 'ms_stripper_replace_enabled'");
@@ -160,6 +160,14 @@ internal sealed unsafe class Stripper : IModSharpModule, IGameListener
 
             var mapName   = _modSharp.GetGlobals().MapName;
             var worldName = pSingleWorld->Name.Get();
+            var verbose   = _cvarEnableVerbose.GetBool();
+
+            if (verbose)
+            {
+                _logger.LogInformation(
+                    "[Stripper] Entering world '{World}' (map='{Map}') with {Count} entity lump(s)",
+                    worldName, mapName, lumpHandles.Count);
+            }
 
             for (var i = 0; i < lumpHandles.Count; i++)
             {
@@ -173,8 +181,18 @@ internal sealed unsafe class Stripper : IModSharpModule, IGameListener
                 }
 
                 var lumpName = lumpData->pName.Get();
+                var keyPair  = $"{worldName}::{lumpName}";
 
-                if (_config.Lumps.TryGetValue($"{worldName}::{lumpName}", out var lumpOverrides))
+                var matched = _config.Lumps.TryGetValue(keyPair, out var lumpOverrides);
+
+                if (verbose)
+                {
+                    _logger.LogInformation(
+                        "[Stripper]   lump[{Idx}] key='{Key}' matched={Matched}",
+                        i, keyPair, matched);
+                }
+
+                if (matched && lumpOverrides is not null)
                 {
                     ApplyOverrides(lumpOverrides, lumpData);
                 }
