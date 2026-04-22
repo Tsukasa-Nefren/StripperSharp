@@ -131,11 +131,27 @@ internal class StripperConfig
                 var parentDir = Path.GetDirectoryName(cleanPath);
                 var fileName  = Path.GetFileNameWithoutExtension(cleanPath);
 
+                // 정규 파일명 whitelist — 맵 제작자가 백업/WIP 목적으로 두는 변형 파일
+                // (예: default_ents(t).jsonc, default_1ents.jsonc, default_ents.bak.jsonc)이
+                // 실수로 로드되어 맵에 적용되는 것을 방지한다.
+                //
+                // 허용:
+                //   "default_ents"              (main world 의 기본 lump)
+                //   "<worldName>#<lumpName>"    (sub-world prefab 규칙 — 두 부분 모두 깨끗한 식별자)
+                //
+                // 거부 (로그만 남기고 skip):
+                //   괄호, 공백, '.' 가 들어간 이름
+                //   '#' 가 없는 비표준 이름 (default_1ents 등)
+                if (!IsCanonicalStripperFileName(fileName))
+                {
+                    _logger?.LogDebug("Skipping non-canonical stripper file: {File}", filePath);
+                    continue;
+                }
+
                 // 이 포크가 지원해야 하는 파일명 컨벤션:
                 //   1) "default_ents.jsonc"                 → mapName::default_ents
                 //   2) "<worldName>#<lumpName>.jsonc"       → worldName::lumpName  (sub-world prefab instance 등)
-                //   3) "<subdir>/<lumpName>.jsonc"          → subdir::lumpName     (skybox 등)
-                //   4) "default_ents(t).jsonc", "default_1ents.jsonc" 같은 변형도 lumpName 그대로 보존
+                //   3) "<subdir>/<lumpName>.jsonc"          → subdir::lumpName     (skybox 등, parentDir 로 진입)
                 string worldName;
                 string lumpName;
 
@@ -191,6 +207,41 @@ internal class StripperConfig
         _logger?.LogInformation(
             "Stripper config loaded for map '{Map}': {LumpCount} lump entries, {ActionCount} action entries, global={Global}, global_default={GlobalDefault}",
             mapName, Lumps.Count, LumpsActions.Count, Global is not null, GlobalDefault is not null);
+    }
+
+    // 정규 stripper 파일명 판별.
+    //
+    // 허용 케이스:
+    //   "default_ents"              — main/sub world 의 기본 entity lump
+    //   "<worldName>#<lumpName>"    — sub-world prefab 규칙. worldName, lumpName 모두 '.', 공백, 괄호 없이 영문/숫자/언더스코어 조합이어야 함.
+    //
+    // 거부 케이스 (맵 작성자 WIP/백업 방지):
+    //   default_ents(t), default_1ents, default_ents.bak, default_ents copy 등
+    private static readonly char[] ForbiddenFileNameChars = { '(', ')', '[', ']', '{', '}', '.', ' ', '\t' };
+
+    private static bool IsCanonicalStripperFileName(string fileName)
+    {
+        if (string.IsNullOrEmpty(fileName))
+            return false;
+
+        // 금지 문자 포함 여부 (괄호·공백·점 등)
+        if (fileName.IndexOfAny(ForbiddenFileNameChars) >= 0)
+            return false;
+
+        // 정확히 "default_ents"
+        if (fileName.Equals("default_ents", StringComparison.Ordinal))
+            return true;
+
+        // "<worldName>#<lumpName>" — '#' 기준 두 부분 모두 비어있지 않아야 함
+        var hashIdx = fileName.IndexOf('#');
+        if (hashIdx <= 0 || hashIdx >= fileName.Length - 1)
+            return false;
+
+        // '#' 가 둘 이상이면 거부 (ambiguous)
+        if (fileName.IndexOf('#', hashIdx + 1) >= 0)
+            return false;
+
+        return true;
     }
 
     private StripperFile? LoadFile(string file)
