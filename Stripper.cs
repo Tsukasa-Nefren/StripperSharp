@@ -1,3 +1,22 @@
+/*
+ * StripperSharp
+ * Copyright (C) 2023-2025 Kxnrl. All Rights Reserved.
+ *
+ * This file is part of StripperSharp.
+ * ModSharp is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as
+ * published by the Free Software Foundation, either version 3 of the
+ * License, or (at your option) any later version.
+ *
+ * ModSharp is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with ModSharp. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -23,10 +42,11 @@ internal sealed unsafe class Stripper : IModSharpModule, IGameListener
 
     public static readonly JsonSerializerOptions SerializerOptions = new JsonSerializerOptions
     {
-        AllowTrailingCommas  = true,
-        ReadCommentHandling  = JsonCommentHandling.Skip,
-        PropertyNamingPolicy = null,
-        WriteIndented        = true,
+        AllowTrailingCommas          = true,
+        ReadCommentHandling          = JsonCommentHandling.Skip,
+        PropertyNameCaseInsensitive  = true,
+        PropertyNamingPolicy         = null,
+        WriteIndented                = true,
     };
 
     private static Stripper?                                         _sInstance;
@@ -252,7 +272,7 @@ internal sealed unsafe class Stripper : IModSharpModule, IGameListener
                 {
                     var kv = lump->EntityKeyValues.Element(j).Value;
 
-                    if (Matcher.DoesEntityMatch(kv, matches))
+                    if (Matcher.DoesEntityMatch(kv, matches, out var matchedConnectionIndices))
                     {
                         if (deletions is { } del)
                         {
@@ -266,7 +286,7 @@ internal sealed unsafe class Stripper : IModSharpModule, IGameListener
 
                         if (replaces is { } rep)
                         {
-                            Modifier.InsertKeyValues(kv, rep, false);
+                            Modifier.ReplaceKeyValues(kv, rep, matchedConnectionIndices);
 
                             if (enableVerbose && builder != null)
                             {
@@ -304,7 +324,14 @@ file static unsafe class Matcher
     internal const string IOKey = "io";
 
     internal static bool DoesEntityMatch(CEntityKeyValues* kv, Dictionary<string, JsonDocument> matches)
+        => DoesEntityMatch(kv, matches, out _);
+
+    internal static bool DoesEntityMatch(CEntityKeyValues*                      kv,
+        Dictionary<string, JsonDocument>                                       matches,
+        out List<int>                                                          matchedConnectionIndices)
     {
+        matchedConnectionIndices = new List<int>();
+
         foreach (var (key, doc) in matches)
         {
             if (key.Equals(ConnectionsKey, StringComparison.OrdinalIgnoreCase) || key.Equals(IOKey, StringComparison.OrdinalIgnoreCase))
@@ -328,7 +355,12 @@ file static unsafe class Matcher
                 {
                     ref var desc = ref kv->ConnectionDescs[i];
 
-                    if (!MatchConnection(in desc, connections))
+                    if (MatchConnection(in desc, connections))
+                    {
+                        // replace.io 를 위해 매치된 connection 인덱스 수집.
+                        matchedConnectionIndices.Add(i);
+                    }
+                    else
                     {
                         return false;
                     }
@@ -432,41 +464,17 @@ file static unsafe class Matcher
 file static unsafe class Modifier
 {
     internal static void InsertKeyValues(CEntityKeyValues* kv,
-        Dictionary<string, JsonDocument>                   insertions,
-        bool                                               loopableConnection = true)
+        Dictionary<string, JsonDocument>                   insertions)
     {
         foreach (var (key, doc) in insertions)
         {
             if (key.Equals(Matcher.ConnectionsKey, StringComparison.OrdinalIgnoreCase) || key.Equals(Matcher.IOKey, StringComparison.OrdinalIgnoreCase))
             {
-                if (loopableConnection)
+                var connections = doc.Deserialize<List<StripperConnection>>(Stripper.SerializerOptions)
+                                  ?? throw new JsonException("Failed to Deserialize<List<StripperConnection>>");
+
+                foreach (var connection in connections)
                 {
-                    var connections = doc.Deserialize<List<StripperConnection>>(Stripper.SerializerOptions)
-                                      ?? throw new JsonException("Failed to Deserialize<List<StripperConnection>>");
-
-                    foreach (var connection in connections)
-                    {
-                        if (string.IsNullOrWhiteSpace(connection.Output)
-                            || string.IsNullOrWhiteSpace(connection.Input)
-                            || string.IsNullOrWhiteSpace(connection.Target))
-                        {
-                            throw new InvalidDataException("Missing 'output' or 'input' or 'target'");
-                        }
-
-                        kv->AddConnectionDesc(connection.Output,
-                                              EntityIOTargetType.EntityNameOrClassName,
-                                              connection.Target,
-                                              connection.Input,
-                                              connection.Param ?? "",
-                                              connection.Delay.GetValueOrDefault(),
-                                              connection.Limit.GetValueOrDefault(-1));
-                    }
-                }
-                else
-                {
-                    var connection = doc.Deserialize<StripperConnection>(Stripper.SerializerOptions)
-                                     ?? throw new JsonException("Failed to Deserialize<StripperConnection>");
-
                     if (string.IsNullOrWhiteSpace(connection.Output)
                         || string.IsNullOrWhiteSpace(connection.Input)
                         || string.IsNullOrWhiteSpace(connection.Target))
@@ -481,6 +489,70 @@ file static unsafe class Modifier
                                           connection.Param ?? "",
                                           connection.Delay.GetValueOrDefault(),
                                           connection.Limit.GetValueOrDefault(-1));
+                }
+            }
+            else
+            {
+                if (doc.RootElement.GetString() is not { } value)
+                {
+                    throw new JsonException($"Invalid value of [{key}]");
+                }
+
+                kv->AddOrSetKeyValueMemberString(key, value);
+            }
+        }
+    }
+
+    // StripperCS2 원본(actions.cpp:197-222)의 replace 동작 구현.
+    // 매치된 기존 connection의 필드를 replace.io 값으로 병합(명시되지 않은 필드는 기존값 유지)한 뒤
+    // 기존 connection을 제거하고 병합된 값으로 재추가. 일반 키-값은 insert 와 동일하게 설정.
+    internal static void ReplaceKeyValues(CEntityKeyValues* kv,
+        Dictionary<string, JsonDocument>                          replaces,
+        List<int>                                                 matchedConnectionIndices)
+    {
+        foreach (var (key, doc) in replaces)
+        {
+            if (key.Equals(Matcher.ConnectionsKey, StringComparison.OrdinalIgnoreCase) || key.Equals(Matcher.IOKey, StringComparison.OrdinalIgnoreCase))
+            {
+                if (matchedConnectionIndices.Count == 0)
+                {
+                    continue;
+                }
+
+                var connections = doc.Deserialize<List<StripperConnection>>(Stripper.SerializerOptions)
+                                  ?? throw new JsonException("Failed to Deserialize<List<StripperConnection>>");
+
+                // 인덱스 역순 순회: 제거 시 뒤쪽 인덱스가 밀리는 것을 방지(DeleteKeyValues 패턴과 동일).
+                for (var n = matchedConnectionIndices.Count - 1; n >= 0; n--)
+                {
+                    var idx = matchedConnectionIndices[n];
+                    if (idx >= kv->ConnectionDescs.Count)
+                    {
+                        continue;
+                    }
+
+                    ref var desc = ref kv->ConnectionDescs[idx];
+
+                    // replace.io 의 n 번째 connection 으로 병합; 항목이 부족하면 마지막 것을 재사용.
+                    var rep = connections.Count > n ? connections[n] : connections[^1];
+
+                    var output = rep.Output ?? desc.OutputName;
+                    var target = rep.Target ?? desc.TargetName;
+                    var input  = rep.Input  ?? desc.InputName;
+                    var param  = rep.Param  ?? desc.OverrideParam;
+                    var delay  = rep.Delay  ?? desc.Delay;
+                    var limit  = rep.Limit  ?? desc.TimesToFire;
+
+                    kv->RemoveConnectionDesc(idx);
+                    matchedConnectionIndices.RemoveAt(n);
+
+                    kv->AddConnectionDesc(output,
+                                          EntityIOTargetType.EntityNameOrClassName,
+                                          target,
+                                          input,
+                                          param,
+                                          delay,
+                                          limit);
                 }
             }
             else

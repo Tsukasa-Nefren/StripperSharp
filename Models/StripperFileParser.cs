@@ -1,3 +1,22 @@
+/*
+ * StripperSharp
+ * Copyright (C) 2023-2025 Kxnrl. All Rights Reserved.
+ *
+ * This file is part of StripperSharp.
+ * ModSharp is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as
+ * published by the Free Software Foundation, either version 3 of the
+ * License, or (at your option) any later version.
+ *
+ * ModSharp is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with ModSharp. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -99,14 +118,23 @@ internal static class StripperFileParser
             {
                 case JsonTokenType.StartObject:
                     depth++;
-                    if (depth == 1)
+                    // 최상위 키의 object 값 시작점을 '{' 위치로 고정.
+                    // depth==2 == 루트 object 내부의 값 object. StartArray 분기와 달리
+                    // object 값은 명시적 시작점 재설정이 없어 깨졌던 버그 수정.
+                    if (depth == 2 && currentKey != null)
                     {
-                        valueStartPosition = reader.BytesConsumed;
+                        var pos = (int)reader.BytesConsumed - 1;
+                        while (pos > 0 && char.IsWhiteSpace((char)bytes[pos - 1]))
+                        {
+                            pos--;
+                        }
+
+                        valueStartPosition = pos;
                     }
                     break;
 
                 case JsonTokenType.EndObject:
-                    if (depth == 1 && currentKey != null)
+                    if (depth == 2 && currentKey != null)
                     {
                         var valueBytes = bytes.AsSpan((int)valueStartPosition, (int)(reader.BytesConsumed - valueStartPosition));
                         var valueJson = Encoding.UTF8.GetString(valueBytes);
@@ -171,7 +199,6 @@ internal static class StripperFileParser
                     if (depth == 1)
                     {
                         currentKey = reader.GetString();
-                        valueStartPosition = reader.BytesConsumed;
                         isValueArray = false;
                     }
                     break;

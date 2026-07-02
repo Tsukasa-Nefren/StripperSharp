@@ -41,7 +41,7 @@ jobs:
         mkdir ./build
         mkdir ./build/gamedata
         mkdir ./build/modules
-        dotnet publish src/StripperSharp.csproj -f net10.0 -r ${{ matrix.runtime }} --no-self-contained -c Release --output ./build/modules/StripperSharp -p:VersionSuffix=${{env.GITCOMMIT}}
+        dotnet publish StripperSharp.csproj -f net10.0 -r ${{ matrix.runtime }} --no-self-contained -c Release --output ./build/modules/StripperSharp -p:VersionSuffix=${{env.GITCOMMIT}}
         cp -r ./gamedata/* ./build/gamedata
 
     - name: Upload artifact

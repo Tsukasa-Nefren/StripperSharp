@@ -1,44 +1,52 @@
+/*
+ * StripperSharp
+ * Copyright (C) 2023-2025 Kxnrl. All Rights Reserved.
+ *
+ * This file is part of StripperSharp.
+ * ModSharp is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as
+ * published by the Free Software Foundation, either version 3 of the
+ * License, or (at your option) any later version.
+ *
+ * ModSharp is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with ModSharp. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Text;
-using System.Text.Json;
-using Kxnrl.StripperSharp.Actions;
 using Microsoft.Extensions.Logging;
 
 namespace Kxnrl.StripperSharp.Models;
 
 internal class StripperConfig
 {
-    public StripperFile?                                        Global        { get; private set; }
-    public StripperFile?                                        GlobalDefault { get; private set; }
-    public Dictionary<string, StripperFile>                    Lumps         { get; init; }
-    public List<BaseAction>                                     GlobalActions { get; private set; }
-    public List<BaseAction>                                     GlobalDefaultActions { get; private set; }
-    public Dictionary<string, List<BaseAction>>                LumpsActions  { get; init; }
+    public StripperFile?                             Global        { get; private set; }
+    public StripperFile?                             GlobalDefault { get; private set; }
+    public Dictionary<string, StripperFile>          Lumps         { get; init; }
 
-    public bool HasData => Global is not null || GlobalDefault is not null || Lumps.Count > 0
-                           || (GlobalActions?.Count ?? 0) > 0 || (GlobalDefaultActions?.Count ?? 0) > 0 || LumpsActions.Count > 0;
+    public bool HasData => Global is not null || GlobalDefault is not null || Lumps.Count > 0;
 
     private readonly string       _stripperPath;
     private readonly UTF8Encoding _encoding;
-    private readonly ILogger?      _logger;
+    private readonly ILogger?     _logger;
 
     public StripperConfig(string path, ILogger? logger = null)
     {
         _stripperPath = path;
         _encoding     = new UTF8Encoding(false);
         Lumps         = new Dictionary<string, StripperFile>(StringComparer.OrdinalIgnoreCase);
-        LumpsActions  = new Dictionary<string, List<BaseAction>>(StringComparer.OrdinalIgnoreCase);
-        GlobalActions = new List<BaseAction>();
-        GlobalDefaultActions = new List<BaseAction>();
-        _logger = logger;
-        
+        _logger       = logger;
+
         if (logger != null)
         {
             StripperFileParser.SetLogger(logger);
-            JsonProvider.SetLogger(logger);
         }
     }
 
@@ -47,9 +55,6 @@ internal class StripperConfig
         Global        = null;
         GlobalDefault = null;
         Lumps.Clear();
-        GlobalActions?.Clear();
-        GlobalDefaultActions?.Clear();
-        LumpsActions.Clear();
     }
 
     public void Load(string mapName)
@@ -62,18 +67,7 @@ internal class StripperConfig
         try
         {
             var globalPath = Path.Combine(_stripperPath, "global.jsonc");
-            if (File.Exists(globalPath))
-            {
-                GlobalActions = JsonProvider.Load(globalPath);
-                _logger?.LogDebug("Loaded global.jsonc with {Count} actions", GlobalActions.Count);
-            }
-
             var globalDefaultPath = Path.Combine(_stripperPath, "global_default.jsonc");
-            if (File.Exists(globalDefaultPath))
-            {
-                GlobalDefaultActions = JsonProvider.Load(globalDefaultPath);
-                _logger?.LogDebug("Loaded global_default.jsonc with {Count} actions", GlobalDefaultActions.Count);
-            }
 
             Global        = LoadFile(globalPath);
             GlobalDefault = LoadFile(globalDefaultPath);
@@ -102,13 +96,6 @@ internal class StripperConfig
                 var lumpName  = Path.GetFileNameWithoutExtension(cleanPath);
                 var keyPair   = $"{worldName}::{lumpName}";
 
-                var actions = JsonProvider.Load(filePath);
-                if (actions.Count > 0)
-                {
-                    LumpsActions[keyPair] = actions;
-                    _logger?.LogDebug("Loaded {Path} with {Count} actions", filePath, actions.Count);
-                }
-
                 var lumpData = LoadFile(filePath);
                 if (lumpData != null)
                 {
@@ -118,7 +105,6 @@ internal class StripperConfig
             catch (Exception e)
             {
                 Lumps.Clear();
-                LumpsActions.Clear();
 
                 throw new FileLoadException("Failed to parse stripper file", filePath, e);
             }
@@ -141,7 +127,7 @@ internal class StripperConfig
         }
         else
         {
-            _logger?.LogDebug("Successfully parsed file: {File}, Add={AddCount}, Modify={ModifyCount}, Remove={RemoveCount}", 
+            _logger?.LogDebug("Successfully parsed file: {File}, Add={AddCount}, Modify={ModifyCount}, Remove={RemoveCount}",
                 file, result.Add?.Count ?? 0, result.Modify?.Count ?? 0, result.Remove?.Count ?? 0);
         }
         return result;
