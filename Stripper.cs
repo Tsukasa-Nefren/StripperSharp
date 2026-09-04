@@ -259,16 +259,6 @@ internal sealed unsafe class Stripper : IModSharpModule, IGameListener
 
                     if (Matcher.DoesEntityMatch(kv, matches, out var matchedConnectionIndices))
                     {
-                        if (replaces is { } rep)
-                        {
-                            Modifier.ReplaceKeyValues(kv, rep, matchedConnectionIndices);
-
-                            if (enableVerbose && builder != null)
-                            {
-                                builder.Append($"  Replaced\n    {JsonSerializer.Serialize(rep, SerializerOptions)}\n");
-                            }
-                        }
-
                         if (deletions is { } del)
                         {
                             Modifier.DeleteKeyValues(kv, del);
@@ -276,6 +266,16 @@ internal sealed unsafe class Stripper : IModSharpModule, IGameListener
                             if (enableVerbose && builder != null)
                             {
                                 builder.Append($"  Deleted\n    {JsonSerializer.Serialize(del, SerializerOptions)}\n");
+                            }
+                        }
+
+                        if (replaces is { } rep)
+                        {
+                            Modifier.ReplaceKeyValues(kv, rep, matchedConnectionIndices);
+
+                            if (enableVerbose && builder != null)
+                            {
+                                builder.Append($"  Replaced\n    {JsonSerializer.Serialize(rep, SerializerOptions)}\n");
                             }
                         }
 
@@ -620,13 +620,12 @@ file static unsafe class Modifier
                     var param  = rep.Param  ?? desc.OverrideParam;
                     var delay  = rep.Delay  ?? desc.Delay;
                     var limit  = rep.Limit  ?? desc.TimesToFire;
-                    var targetType = desc.TargetType;
 
                     kv->RemoveConnectionDesc(idx);
                     matchedConnectionIndices.RemoveAt(n);
 
                     kv->AddConnectionDesc(output,
-                                          targetType,
+                                          EntityIOTargetType.EntityNameOrClassName,
                                           target,
                                           input,
                                           param,

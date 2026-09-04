@@ -81,7 +81,8 @@ internal unsafe struct CEntityKeyValues
                 "CEntityKeyValues::CEntityKeyValues");
 
         _fnAddConnectionDesc
-            = (delegate* unmanaged<CEntityKeyValues*, byte*, EntityIOTargetType, byte*, byte*, byte*, float, int, void>)
+            = (delegate* unmanaged<CEntityKeyValues*, byte*, EntityIOTargetType, byte*, byte*, byte*, int, float, CKeyValues3*,
+                void>)
             gameData.GetAddress("CEntityKeyValues::AddConnectionDesc");
 
         _initialized = true;
@@ -94,7 +95,8 @@ internal unsafe struct CEntityKeyValues
     private static delegate* unmanaged<CEntityKeyValues*, CHashKey*, void>                _fnRemoveKeyValues;
     private static delegate* unmanaged<CEntityKeyValues*, nint, AllocatorType, void>      _fnConstructor;
 
-    private static delegate* unmanaged<CEntityKeyValues*, byte*, EntityIOTargetType, byte*, byte*, byte*, float, int, void>
+    private static delegate* unmanaged<CEntityKeyValues*, byte*, EntityIOTargetType, byte*, byte*, byte*, int, float,
+        CKeyValues3*, void>
         _fnAddConnectionDesc;
 
     private static delegate* unmanaged<byte*, uint> _fnMakeStringToken;
@@ -282,7 +284,9 @@ internal unsafe struct CEntityKeyValues
             fixed (byte* pParam = paramBytes)
             fixed (CEntityKeyValues* pThis = &this)
             {
-                _fnAddConnectionDesc(pThis, pOutput, targetType, pTarget, pInput, pParam, delay, limit);
+                var kv3 = CKeyValues3.Create(KeyValues3Type.Null, KeyValues3SubType.UnSpecified);
+                _fnAddConnectionDesc(pThis, pOutput, targetType, pTarget, pInput, pParam, limit, delay, kv3);
+                kv3->DeleteThis();
             }
         }
         finally
