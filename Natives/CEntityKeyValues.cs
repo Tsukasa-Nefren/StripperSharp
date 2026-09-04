@@ -19,6 +19,7 @@
 
 using System;
 using System.Buffers;
+using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -80,8 +81,7 @@ internal unsafe struct CEntityKeyValues
                 "CEntityKeyValues::CEntityKeyValues");
 
         _fnAddConnectionDesc
-            = (delegate* unmanaged<CEntityKeyValues*, byte*, EntityIOTargetType, byte*, byte*, byte*, int, float, CKeyValues3*,
-                void>)
+            = (delegate* unmanaged<CEntityKeyValues*, byte*, EntityIOTargetType, byte*, byte*, byte*, float, int, void>)
             gameData.GetAddress("CEntityKeyValues::AddConnectionDesc");
 
         _initialized = true;
@@ -94,11 +94,12 @@ internal unsafe struct CEntityKeyValues
     private static delegate* unmanaged<CEntityKeyValues*, CHashKey*, void>                _fnRemoveKeyValues;
     private static delegate* unmanaged<CEntityKeyValues*, nint, AllocatorType, void>      _fnConstructor;
 
-    private static delegate* unmanaged<CEntityKeyValues*, byte*, EntityIOTargetType, byte*, byte*, byte*, int, float,
-        CKeyValues3*, void>
+    private static delegate* unmanaged<CEntityKeyValues*, byte*, EntityIOTargetType, byte*, byte*, byte*, float, int, void>
         _fnAddConnectionDesc;
 
     private static delegate* unmanaged<byte*, uint> _fnMakeStringToken;
+
+    private static readonly ConcurrentDictionary<string, uint> TokenCache = new();
 
     public static CEntityKeyValues* Create(nint pContext, AllocatorType type)
     {
@@ -136,7 +137,7 @@ internal unsafe struct CEntityKeyValues
                 var unknown = false;
                 var hashKey = stackalloc CHashKey[1];
 
-                hashKey->HashCode   = _fnMakeStringToken(ptr);
+                hashKey->HashCode   = GetToken(member, ptr);
                 hashKey->KeyPointer = ptr;
 
                 fixed (CEntityKeyValues* pThis = &this)
@@ -173,7 +174,7 @@ internal unsafe struct CEntityKeyValues
             {
                 var hashKey = stackalloc CHashKey[1];
 
-                hashKey->HashCode   = _fnMakeStringToken(ptr);
+                hashKey->HashCode   = GetToken(member, ptr);
                 hashKey->KeyPointer = ptr;
 
                 fixed (CEntityKeyValues* pThis = &this)
@@ -281,9 +282,7 @@ internal unsafe struct CEntityKeyValues
             fixed (byte* pParam = paramBytes)
             fixed (CEntityKeyValues* pThis = &this)
             {
-                var kv3 = CKeyValues3.Create(KeyValues3Type.Null, KeyValues3SubType.UnSpecified);
-                _fnAddConnectionDesc(pThis, pOutput, targetType, pTarget, pInput, pParam, limit, delay, kv3);
-                kv3->DeleteThis();
+                _fnAddConnectionDesc(pThis, pOutput, targetType, pTarget, pInput, pParam, delay, limit);
             }
         }
         finally
@@ -317,7 +316,7 @@ internal unsafe struct CEntityKeyValues
             {
                 var hashKey = stackalloc CHashKey[1];
 
-                hashKey->HashCode   = _fnMakeStringToken(ptr);
+                hashKey->HashCode   = GetToken(member, ptr);
                 hashKey->KeyPointer = ptr;
 
                 fixed (CEntityKeyValues* pThis = &this)
@@ -330,6 +329,19 @@ internal unsafe struct CEntityKeyValues
         {
             pool.Return(memberBytes);
         }
+    }
+
+    private static uint GetToken(string member, byte* ptr)
+    {
+        if (TokenCache.TryGetValue(member, out var token))
+        {
+            return token;
+        }
+
+        token = _fnMakeStringToken(ptr);
+        TokenCache[member] = token;
+
+        return token;
     }
 
     public void RemoveConnectionDesc(int index)

@@ -19,6 +19,7 @@
 
 using System;
 using System.Buffers;
+using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -132,11 +133,11 @@ internal unsafe struct CKeyValues3
             case KeyValues3Type.Bool:
                 return _bValue ? "true" : "false";
             case KeyValues3Type.Int:
-                return _iValue.ToString();
+                return _iValue.ToString(CultureInfo.InvariantCulture);
             case KeyValues3Type.UInt:
-                return _uValue.ToString();
+                return _uValue.ToString(CultureInfo.InvariantCulture);
             case KeyValues3Type.Double:
-                return _dValue.ToString("F6");
+                return _dValue.ToString("F6", CultureInfo.InvariantCulture);
             case KeyValues3Type.String:
                 return GetString();
             case KeyValues3Type.BinaryBlob:

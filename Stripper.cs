@@ -18,11 +18,13 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Kxnrl.StripperSharp.Models;
 using Kxnrl.StripperSharp.Natives;
 using Microsoft.Extensions.Configuration;
@@ -58,7 +60,8 @@ internal sealed unsafe class Stripper : IModSharpModule, IGameListener
     private readonly StripperConfig    _config;
 
     private readonly IConVar _cvarEnableVerbose;
-    private readonly IConVar _cvarEnableReplace;
+
+    private readonly Dictionary<StripperFile, List<ParsedModify>> _modifyCache = new();
 
     public Stripper(ISharedSystem sharedSystem,
         string                    dllPath,
@@ -80,13 +83,6 @@ internal sealed unsafe class Stripper : IModSharpModule, IGameListener
                                                        "Enable verbose logging of stripper",
                                                        ConVarFlags.Release)
                              ?? throw new EntryPointNotFoundException("Failed to create conVar 'ms_stripper_verbose_enabled'");
-
-        _cvarEnableReplace = sharedSystem.GetConVarManager()
-                                         .CreateConVar("ms_stripper_replace_enabled",
-                                                       true,
-                                                       "Enable 'replace' block in 'modify' section.",
-                                                       ConVarFlags.Release)
-                             ?? throw new EntryPointNotFoundException("Failed to create conVar 'ms_stripper_replace_enabled'");
 
         _sInstance = this;
     }
@@ -126,7 +122,10 @@ internal sealed unsafe class Stripper : IModSharpModule, IGameListener
     int IGameListener.ListenerVersion  => IGameListener.ApiVersion;
 
     public void OnServerInit()
-        => _config.Purge();
+    {
+        _modifyCache.Clear();
+        _config.Purge();
+    }
 
     public void OnGameInit()
     {
@@ -145,6 +144,11 @@ internal sealed unsafe class Stripper : IModSharpModule, IGameListener
     {
         var call = _sTrampoline(pWorldRendererMgr, pSingleWorld);
 
+        if (call == nint.Zero)
+        {
+            return call;
+        }
+
         if (_sInstance is { _config.HasData: true } stripper)
         {
             stripper.ApplyOverrides(pSingleWorld);
@@ -160,7 +164,10 @@ internal sealed unsafe class Stripper : IModSharpModule, IGameListener
             ref var lumpHandles = ref pSingleWorld->pWorld->EntityLumps;
 
             var mapName   = _modSharp.GetGlobals().MapName;
-            var worldName = pSingleWorld->Name.Get();
+
+            // 실측(2026-08-06): Windows 서버의 프리팹 월드명은 백슬래시("perfab\mako_skybox").
+            // 설정 키는 슬래시로 정규화돼 있으므로 룩업 측도 슬래시로 맞춘다.
+            var worldName = pSingleWorld->Name.Get().Replace('\\', '/');
 
             for (var i = 0; i < lumpHandles.Count; i++)
             {
@@ -233,37 +240,15 @@ internal sealed unsafe class Stripper : IModSharpModule, IGameListener
             }
         }
 
-        if (config.Modify is { Count: > 0 } modifies)
+        if (config.Modify is { Count: > 0 })
         {
-            foreach (var modify in modifies)
+            foreach (var modify in GetParsedModifies(config))
             {
-                if (!modify.TryGetValue("match", out var matchDoc))
-                {
-                    throw new JsonException("Missing 'match' block in 'modify' section");
-                }
+                var matches    = modify.Matches;
+                var deletions  = modify.Deletions;
+                var insertions = modify.Insertions;
 
-                var matches = matchDoc.Deserialize<Dictionary<string, JsonDocument>>(SerializerOptions)
-                              ?? throw new JsonException("Failed to Deserialize<Dictionary<string, JsonDocument>>");
-
-                // Deserialize를 루프 밖에서 한 번만 수행
-                Dictionary<string, JsonDocument>? deletions = null;
-                Dictionary<string, JsonDocument>? replaces = null;
-                Dictionary<string, JsonDocument>? insertions = null;
-
-                if (modify.TryGetValue("delete", out var deleteDoc))
-                {
-                    deletions = deleteDoc.Deserialize<Dictionary<string, JsonDocument>>(SerializerOptions);
-                }
-
-                if (modify.TryGetValue("replace", out var replaceDoc) && _cvarEnableReplace.GetBool())
-                {
-                    replaces = replaceDoc.Deserialize<Dictionary<string, JsonDocument>>(SerializerOptions);
-                }
-
-                if (modify.TryGetValue("insert", out var insertDoc))
-                {
-                    insertions = insertDoc.Deserialize<Dictionary<string, JsonDocument>>(SerializerOptions);
-                }
+                var replaces = modify.Replacements;
 
                 var enableVerbose = _cvarEnableVerbose.GetBool();
                 StringBuilder? builder = enableVerbose ? new StringBuilder() : null;
@@ -274,16 +259,6 @@ internal sealed unsafe class Stripper : IModSharpModule, IGameListener
 
                     if (Matcher.DoesEntityMatch(kv, matches, out var matchedConnectionIndices))
                     {
-                        if (deletions is { } del)
-                        {
-                            Modifier.DeleteKeyValues(kv, del);
-
-                            if (enableVerbose && builder != null)
-                            {
-                                builder.Append($"  Deleted\n    {JsonSerializer.Serialize(del, SerializerOptions)}\n");
-                            }
-                        }
-
                         if (replaces is { } rep)
                         {
                             Modifier.ReplaceKeyValues(kv, rep, matchedConnectionIndices);
@@ -291,6 +266,16 @@ internal sealed unsafe class Stripper : IModSharpModule, IGameListener
                             if (enableVerbose && builder != null)
                             {
                                 builder.Append($"  Replaced\n    {JsonSerializer.Serialize(rep, SerializerOptions)}\n");
+                            }
+                        }
+
+                        if (deletions is { } del)
+                        {
+                            Modifier.DeleteKeyValues(kv, del);
+
+                            if (enableVerbose && builder != null)
+                            {
+                                builder.Append($"  Deleted\n    {JsonSerializer.Serialize(del, SerializerOptions)}\n");
                             }
                         }
 
@@ -316,23 +301,94 @@ internal sealed unsafe class Stripper : IModSharpModule, IGameListener
             }
         }
     }
+
+    private static Dictionary<string, JsonElement>? DeserializeSection(JsonElement element)
+        => element.Deserialize<Dictionary<string, JsonElement>>(SerializerOptions);
+
+    // StripperCS2 파리티: io 는 배열·단일 객체 양쪽 허용(커뮤니티 팩이 객체형 실사용).
+    internal static List<StripperConnection> DeserializeConnections(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            return [element.Deserialize<StripperConnection>(SerializerOptions)
+                    ?? throw new JsonException("Failed to Deserialize<StripperConnection>")];
+        }
+
+        return element.Deserialize<List<StripperConnection>>(SerializerOptions)
+               ?? throw new JsonException("Failed to Deserialize<List<StripperConnection>>");
+    }
+
+    private List<ParsedModify> GetParsedModifies(StripperFile config)
+    {
+        if (_modifyCache.TryGetValue(config, out var cached))
+        {
+            return cached;
+        }
+
+        var parsed = new List<ParsedModify>();
+
+        foreach (var modify in config.Modify!)
+        {
+            if (!modify.TryGetValue("match", out var matchDoc))
+            {
+                throw new JsonException("Missing 'match' block in 'modify' section");
+            }
+
+            var block = new ParsedModify
+            {
+                Matches = matchDoc.Deserialize<Dictionary<string, JsonElement>>(SerializerOptions)
+                          ?? throw new JsonException("Failed to Deserialize<Dictionary<string, JsonElement>>"),
+            };
+
+            if (modify.TryGetValue("delete", out var deleteDoc))
+            {
+                block.Deletions = DeserializeSection(deleteDoc);
+            }
+
+            if (modify.TryGetValue("replace", out var replaceDoc))
+            {
+                block.Replacements = DeserializeSection(replaceDoc);
+            }
+
+            if (modify.TryGetValue("insert", out var insertDoc))
+            {
+                block.Insertions = DeserializeSection(insertDoc);
+            }
+
+            parsed.Add(block);
+        }
+
+        _modifyCache[config] = parsed;
+
+        return parsed;
+    }
+
+    private sealed class ParsedModify
+    {
+        public Dictionary<string, JsonElement>  Matches = null!;
+        public Dictionary<string, JsonElement>? Deletions;
+        public Dictionary<string, JsonElement>? Insertions;
+        public Dictionary<string, JsonElement>? Replacements;
+    }
 }
 
 file static unsafe class Matcher
 {
+    private static readonly ConcurrentDictionary<string, Regex> MatchRegexCache = new();
+
     internal const string ConnectionsKey = "connections";
     internal const string IOKey = "io";
 
-    internal static bool DoesEntityMatch(CEntityKeyValues* kv, Dictionary<string, JsonDocument> matches)
+    internal static bool DoesEntityMatch(CEntityKeyValues* kv, Dictionary<string, JsonElement> matches)
         => DoesEntityMatch(kv, matches, out _);
 
     internal static bool DoesEntityMatch(CEntityKeyValues*                      kv,
-        Dictionary<string, JsonDocument>                                       matches,
-        out List<int>                                                          matchedConnectionIndices)
+        Dictionary<string, JsonElement>                                       matches,
+        out List<int>?                                                        matchedConnectionIndices)
     {
-        matchedConnectionIndices = new List<int>();
+        matchedConnectionIndices = null;
 
-        foreach (var (key, doc) in matches)
+        foreach (var (key, element) in matches)
         {
             if (key.Equals(ConnectionsKey, StringComparison.OrdinalIgnoreCase) || key.Equals(IOKey, StringComparison.OrdinalIgnoreCase))
             {
@@ -343,13 +399,17 @@ file static unsafe class Matcher
                     return false;
                 }
 
-                var connections = doc.Deserialize<List<StripperConnection>>(Stripper.SerializerOptions)
-                                  ?? throw new JsonException("Failed to Deserialize<List<StripperConnection>>");
+                var connections = Stripper.DeserializeConnections(element);
 
                 if (connections.Count == 0)
                 {
                     continue;
                 }
+
+                // StripperCS2 파리티(actions.cpp DoesEntityMatch): 커넥션 중 **하나라도** 조건과
+                // 일치하면 엔티티 매치이고, 일치한 커넥션들만 수집한다. (과거 전건일치 요구는
+                // 포팅 오류 — io-match 블록 대부분이 조용히 불발되는 원인이었다.)
+                var found = false;
 
                 for (var i = 0; i < connectionCount; i++)
                 {
@@ -357,19 +417,20 @@ file static unsafe class Matcher
 
                     if (MatchConnection(in desc, connections))
                     {
-                        // replace.io 를 위해 매치된 connection 인덱스 수집.
-                        matchedConnectionIndices.Add(i);
+                        (matchedConnectionIndices ??= new List<int>()).Add(i);
+                        found = true;
                     }
-                    else
-                    {
-                        return false;
-                    }
+                }
+
+                if (!found)
+                {
+                    return false;
                 }
 
                 continue;
             }
 
-            if (doc.RootElement.GetString() is not { } match)
+            if (element.GetString() is not { } match)
             {
                 throw new JsonException($"Invalid value of [{key}]");
             }
@@ -447,6 +508,25 @@ file static unsafe class Matcher
 
     internal static bool MatchValue(string value, string match, bool allowWildcard = false)
     {
+        // StripperCS2 파리티(actions.cpp DoesValueMatch): "/.../" 로 감싼 값은 정규식.
+        // 원본은 PCRE2_CASELESS + 비앵커 검색(pcre2_match = 부분일치)이므로 동일하게 맞춘다.
+        // 이 경로는 모든 매치 키와 io 필드에 적용된다(targetname/classname 한정 아님).
+        if (match.Length >= 3 && match[0] == '/' && match[^1] == '/')
+        {
+            try
+            {
+                var regex = MatchRegexCache.GetOrAdd(match[1..^1],
+                                                     static pattern => new Regex(pattern, RegexOptions.IgnoreCase | RegexOptions.Compiled));
+
+                return regex.IsMatch(value);
+            }
+            catch (ArgumentException)
+            {
+                return false; // 원본도 컴파일 실패 시 매치 실패로 처리
+            }
+        }
+
+        // 접미 '*' 와일드카드는 StripperSharp 확장(원본엔 없음 — 기존 배포 설정 호환용 유지).
         if (allowWildcard && match.EndsWith("*"))
         {
             var wildcard = match[..^1];
@@ -464,14 +544,13 @@ file static unsafe class Matcher
 file static unsafe class Modifier
 {
     internal static void InsertKeyValues(CEntityKeyValues* kv,
-        Dictionary<string, JsonDocument>                   insertions)
+        Dictionary<string, JsonElement>                    insertions)
     {
-        foreach (var (key, doc) in insertions)
+        foreach (var (key, element) in insertions)
         {
             if (key.Equals(Matcher.ConnectionsKey, StringComparison.OrdinalIgnoreCase) || key.Equals(Matcher.IOKey, StringComparison.OrdinalIgnoreCase))
             {
-                var connections = doc.Deserialize<List<StripperConnection>>(Stripper.SerializerOptions)
-                                  ?? throw new JsonException("Failed to Deserialize<List<StripperConnection>>");
+                var connections = Stripper.DeserializeConnections(element);
 
                 foreach (var connection in connections)
                 {
@@ -493,7 +572,7 @@ file static unsafe class Modifier
             }
             else
             {
-                if (doc.RootElement.GetString() is not { } value)
+                if (element.GetString() is not { } value)
                 {
                     throw new JsonException($"Invalid value of [{key}]");
                 }
@@ -507,20 +586,19 @@ file static unsafe class Modifier
     // 매치된 기존 connection의 필드를 replace.io 값으로 병합(명시되지 않은 필드는 기존값 유지)한 뒤
     // 기존 connection을 제거하고 병합된 값으로 재추가. 일반 키-값은 insert 와 동일하게 설정.
     internal static void ReplaceKeyValues(CEntityKeyValues* kv,
-        Dictionary<string, JsonDocument>                          replaces,
-        List<int>                                                 matchedConnectionIndices)
+        Dictionary<string, JsonElement>                   replaces,
+        List<int>?                                         matchedConnectionIndices)
     {
-        foreach (var (key, doc) in replaces)
+        foreach (var (key, element) in replaces)
         {
             if (key.Equals(Matcher.ConnectionsKey, StringComparison.OrdinalIgnoreCase) || key.Equals(Matcher.IOKey, StringComparison.OrdinalIgnoreCase))
             {
-                if (matchedConnectionIndices.Count == 0)
+                if (matchedConnectionIndices is not { Count: > 0 })
                 {
                     continue;
                 }
 
-                var connections = doc.Deserialize<List<StripperConnection>>(Stripper.SerializerOptions)
-                                  ?? throw new JsonException("Failed to Deserialize<List<StripperConnection>>");
+                var connections = Stripper.DeserializeConnections(element);
 
                 // 인덱스 역순 순회: 제거 시 뒤쪽 인덱스가 밀리는 것을 방지(DeleteKeyValues 패턴과 동일).
                 for (var n = matchedConnectionIndices.Count - 1; n >= 0; n--)
@@ -542,12 +620,13 @@ file static unsafe class Modifier
                     var param  = rep.Param  ?? desc.OverrideParam;
                     var delay  = rep.Delay  ?? desc.Delay;
                     var limit  = rep.Limit  ?? desc.TimesToFire;
+                    var targetType = desc.TargetType;
 
                     kv->RemoveConnectionDesc(idx);
                     matchedConnectionIndices.RemoveAt(n);
 
                     kv->AddConnectionDesc(output,
-                                          EntityIOTargetType.EntityNameOrClassName,
+                                          targetType,
                                           target,
                                           input,
                                           param,
@@ -557,7 +636,7 @@ file static unsafe class Modifier
             }
             else
             {
-                if (doc.RootElement.GetString() is not { } value)
+                if (element.GetString() is not { } value)
                 {
                     throw new JsonException($"Invalid value of [{key}]");
                 }
@@ -567,9 +646,9 @@ file static unsafe class Modifier
         }
     }
 
-    internal static void DeleteKeyValues(CEntityKeyValues* kv, Dictionary<string, JsonDocument> deletions)
+    internal static void DeleteKeyValues(CEntityKeyValues* kv, Dictionary<string, JsonElement> deletions)
     {
-        foreach (var (key, doc) in deletions)
+        foreach (var (key, element) in deletions)
         {
             if (key.Equals(Matcher.ConnectionsKey, StringComparison.OrdinalIgnoreCase) || key.Equals(Matcher.IOKey, StringComparison.OrdinalIgnoreCase))
             {
@@ -580,8 +659,7 @@ file static unsafe class Modifier
                     continue;
                 }
 
-                var connections = doc.Deserialize<List<StripperConnection>>(Stripper.SerializerOptions)
-                                  ?? throw new JsonException("Failed to Deserialize<List<StripperConnection>>");
+                var connections = Stripper.DeserializeConnections(element);
 
                 if (connections.Count == 0)
                 {
@@ -600,7 +678,7 @@ file static unsafe class Modifier
             }
             else
             {
-                if (doc.RootElement.GetString() is not { } match)
+                if (element.GetString() is not { } match)
                 {
                     throw new JsonException($"Invalid value of [{key}]");
                 }

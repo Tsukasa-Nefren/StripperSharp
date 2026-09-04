@@ -299,11 +299,11 @@ internal static class StripperFileParser
         return string.Join("\n", result);
     }
 
-    private static IEnumerable<Dictionary<string, JsonDocument>> ParseArrayOrObject(string jsonString)
+    private static IEnumerable<Dictionary<string, JsonElement>> ParseArrayOrObject(string jsonString)
     {
         if (string.IsNullOrWhiteSpace(jsonString))
         {
-            return Array.Empty<Dictionary<string, JsonDocument>>();
+            return Array.Empty<Dictionary<string, JsonElement>>();
         }
 
         try
@@ -313,9 +313,9 @@ internal static class StripperFileParser
                 CommentHandling = JsonCommentHandling.Skip,
                 AllowTrailingCommas = true
             });
-            
-            var results = new List<Dictionary<string, JsonDocument>>();
-            
+
+            var results = new List<Dictionary<string, JsonElement>>();
+
             if (doc.RootElement.ValueKind == JsonValueKind.Array)
             {
                 foreach (var element in doc.RootElement.EnumerateArray())
@@ -330,31 +330,30 @@ internal static class StripperFileParser
             {
                 results.Add(ConvertElementToDictionary(doc.RootElement));
             }
-            
+
             return results;
         }
         catch (JsonException ex)
         {
-            _logger?.LogError(ex, "Failed to parse JSON string from ParseWithDuplicateKeys, skipping. Length: {Length}, Preview: {Preview}", 
-                jsonString.Length, 
+            _logger?.LogError(ex, "Failed to parse JSON string from ParseWithDuplicateKeys, skipping. Length: {Length}, Preview: {Preview}",
+                jsonString.Length,
                 jsonString.Length > 500 ? jsonString.Substring(0, 500) + "..." : jsonString);
-            return Array.Empty<Dictionary<string, JsonDocument>>();
+            return Array.Empty<Dictionary<string, JsonElement>>();
         }
         catch (Exception ex)
         {
             _logger?.LogError(ex, "Unexpected error parsing JSON string. Length: {Length}, Error: {Error}", jsonString.Length, ex.Message);
-            return Array.Empty<Dictionary<string, JsonDocument>>();
+            return Array.Empty<Dictionary<string, JsonElement>>();
         }
     }
 
-    private static Dictionary<string, JsonDocument> ConvertElementToDictionary(JsonElement element)
+    private static Dictionary<string, JsonElement> ConvertElementToDictionary(JsonElement element)
     {
-        var dict = new Dictionary<string, JsonDocument>();
+        var dict = new Dictionary<string, JsonElement>();
 
         foreach (var property in element.EnumerateObject())
         {
-            var propJsonString = property.Value.GetRawText();
-            dict[property.Name] = JsonDocument.Parse(propJsonString);
+            dict[property.Name] = property.Value.Clone();
         }
 
         return dict;

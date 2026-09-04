@@ -27,17 +27,17 @@ namespace Kxnrl.StripperSharp.Models;
 internal class StripperFile
 {
     [JsonPropertyName("add")]
-    public List<Dictionary<string, JsonDocument>>? Add { get; init; }
+    public List<Dictionary<string, JsonElement>>? Add { get; init; }
 
     [JsonPropertyName("modify")]
-    public List<Dictionary<string, JsonDocument>>? Modify { get; init; }
+    public List<Dictionary<string, JsonElement>>? Modify { get; init; }
 
     [JsonPropertyName("remove")]
-    public List<Dictionary<string, JsonDocument>>? Remove { get; init; }
+    public List<Dictionary<string, JsonElement>>? Remove { get; init; }
 
     [Obsolete("Use Remove instead", true)]
     [JsonPropertyName("filter")]
-    public List<Dictionary<string, JsonDocument>>? Filter
+    public List<Dictionary<string, JsonElement>>? Filter
     {
         init => Remove = value;
     }

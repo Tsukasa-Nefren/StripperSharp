@@ -92,7 +92,10 @@ internal class StripperConfig
             {
                 var cleanPath = Path.GetRelativePath(mapPath, filePath);
                 var parentDir = Path.GetDirectoryName(cleanPath);
-                var worldName = string.IsNullOrWhiteSpace(parentDir) ? mapName : parentDir;
+                // Prefab worlds are named with forward slashes by the engine (e.g. "perfab/mako_skybox"),
+                // but Path.GetDirectoryName yields backslashes on Windows — normalize so the
+                // runtime lookup ($"{worldName}::{lumpName}") can ever match for prefab lumps.
+                var worldName = string.IsNullOrWhiteSpace(parentDir) ? mapName : parentDir.Replace('\\', '/');
                 var lumpName  = Path.GetFileNameWithoutExtension(cleanPath);
                 var keyPair   = $"{worldName}::{lumpName}";
 
